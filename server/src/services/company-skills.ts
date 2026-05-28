@@ -183,6 +183,10 @@ type RuntimeSkillEntryOptions = {
   materializeMissing?: boolean;
 };
 
+type RuntimeSkillSourceResolution =
+  | { status: "available"; source: string }
+  | { status: "missing"; source: string; detail: string };
+
 const skillInventoryRefreshPromises = new Map<string, Promise<void>>();
 
 function selectCompanySkillColumns() {
@@ -1491,6 +1495,22 @@ function normalizeSourceLocatorDirectory(sourceLocator: string | null) {
   if (!sourceLocator) return null;
   const resolved = path.resolve(sourceLocator);
   return path.basename(resolved).toLowerCase() === "skill.md" ? path.dirname(resolved) : resolved;
+}
+
+async function resolveExistingSkillDirectory(skillDir: string | null) {
+  if (!skillDir) return null;
+  const dirStat = await statPath(skillDir);
+  const skillFileStat = await statPath(path.join(skillDir, "SKILL.md"));
+  return dirStat?.isDirectory() && skillFileStat?.isFile() ? skillDir : null;
+}
+
+function buildMissingRuntimeSourceDetail(skill: Pick<CompanySkill, "name" | "sourceLocator" | "metadata">) {
+  const marker = getMissingSourceMarker(skill.metadata);
+  const sourcePath = asString(marker?.sourcePath) ?? normalizeSourceLocatorDirectory(skill.sourceLocator);
+  if (sourcePath) {
+    return `Company skill "${skill.name}" is in the library, but Paperclip cannot find its local source at ${sourcePath}.`;
+  }
+  return `Company skill "${skill.name}" is in the library, but Paperclip cannot find a valid local runtime source for it.`;
 }
 
 export async function findMissingLocalSkillIds(
@@ -3022,12 +3042,21 @@ export function companySkillService(db: Db) {
     await fs.rm(skillDir, { recursive: true, force: true });
     await fs.mkdir(skillDir, { recursive: true });
 
+    let wroteSkillFile = false;
     for (const entry of skill.fileInventory) {
-      const detail = await readFile(companyId, skill.id, entry.path).catch(() => null);
-      if (!detail) continue;
+      const normalizedPath = normalizePortablePath(entry.path);
+      const detail = await readFile(companyId, skill.id, normalizedPath).catch(() => null);
+      const content = detail?.content ?? (normalizedPath === "SKILL.md" ? skill.markdown : null);
+      if (content === null) continue;
       const targetPath = path.resolve(skillDir, entry.path);
       await fs.mkdir(path.dirname(targetPath), { recursive: true });
-      await fs.writeFile(targetPath, detail.content, "utf8");
+      await fs.writeFile(targetPath, content, "utf8");
+      if (normalizedPath === "SKILL.md") wroteSkillFile = true;
+    }
+
+    if (!wroteSkillFile) {
+      await fs.rm(skillDir, { recursive: true, force: true });
+      throw unprocessable("Company skill could not be materialized because its stored SKILL.md copy is missing.");
     }
 
     return skillDir;
@@ -3036,6 +3065,29 @@ export function companySkillService(db: Db) {
   function resolveRuntimeSkillMaterializedPath(companyId: string, skill: Pick<CompanySkill, "key" | "slug">) {
     const runtimeRoot = path.resolve(resolveManagedSkillsRoot(companyId), "__runtime__");
     return path.resolve(runtimeRoot, buildSkillRuntimeName(skill.key, skill.slug));
+  }
+
+  async function resolveRuntimeSkillSource(
+    companyId: string,
+    skill: CompanySkill,
+    options: RuntimeSkillEntryOptions,
+  ): Promise<RuntimeSkillSourceResolution | null> {
+    const source = await resolveExistingSkillDirectory(normalizeSkillDirectory(skill));
+    if (source) return { status: "available", source };
+
+    if (options.materializeMissing === false) {
+      const materializedPath = resolveRuntimeSkillMaterializedPath(companyId, skill);
+      const materializedSource = await resolveExistingSkillDirectory(materializedPath);
+      if (materializedSource) return { status: "available", source: materializedSource };
+      return {
+        status: "missing",
+        source: materializedPath,
+        detail: buildMissingRuntimeSourceDetail(skill),
+      };
+    }
+
+    const materializedSource = await materializeRuntimeSkillFiles(companyId, skill).catch(() => null);
+    return materializedSource ? { status: "available", source: materializedSource } : null;
   }
 
   async function listRuntimeSkillEntries(
@@ -3047,19 +3099,16 @@ export function companySkillService(db: Db) {
     const out: PaperclipSkillEntry[] = [];
     for (const skill of skills) {
       const sourceKind = asString(getSkillMeta(skill).sourceKind);
-      let source = normalizeSkillDirectory(skill);
-      if (!source) {
-        source = options.materializeMissing === false
-          ? resolveRuntimeSkillMaterializedPath(companyId, skill)
-          : await materializeRuntimeSkillFiles(companyId, skill).catch(() => null);
-      }
-      if (!source) continue;
+      const sourceResolution = await resolveRuntimeSkillSource(companyId, skill, options);
+      if (!sourceResolution) continue;
 
       const required = sourceKind === "paperclip_bundled";
       out.push({
         key: skill.key,
         runtimeName: buildSkillRuntimeName(skill.key, skill.slug),
-        source,
+        source: sourceResolution.source,
+        sourceStatus: sourceResolution.status,
+        missingDetail: sourceResolution.status === "missing" ? sourceResolution.detail : null,
         required,
         requiredReason: required
           ? "Bundled Paperclip skills are always available for local adapters."

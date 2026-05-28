@@ -133,6 +133,8 @@ export interface PaperclipSkillEntry {
   key: string;
   runtimeName: string;
   source: string;
+  sourceStatus?: "available" | "missing";
+  missingDetail?: string | null;
   required?: boolean;
   requiredReason?: string | null;
 }
@@ -207,6 +209,17 @@ function buildManagedSkillOrigin(entry: { required?: boolean }): Pick<
     originLabel: "Managed by Paperclip",
     readOnly: false,
   };
+}
+
+function isPaperclipSkillSourceMissing(entry: PaperclipSkillEntry) {
+  return entry.sourceStatus === "missing";
+}
+
+function resolvePaperclipSkillMissingDetail(
+  entry: PaperclipSkillEntry,
+  fallback: string,
+) {
+  return entry.missingDetail?.trim() || fallback;
 }
 
 function resolveSkillDetail(
@@ -1429,6 +1442,23 @@ export function buildRuntimeMountedSkillSnapshot(
 
   for (const available of availableEntries) {
     const desired = desiredSet.has(available.key);
+    if (isPaperclipSkillSourceMissing(available)) {
+      entries.push({
+        key: available.key,
+        runtimeName: available.runtimeName,
+        desired,
+        managed: true,
+        state: "missing",
+        sourcePath: null,
+        targetPath: null,
+        detail: resolvePaperclipSkillMissingDetail(available, missingDetail),
+        required: Boolean(available.required),
+        requiredReason: available.requiredReason ?? null,
+        ...buildManagedSkillOrigin(available),
+      });
+      continue;
+    }
+
     const configured = supported && mode === "ephemeral" && desired;
     entries.push({
       key: available.key,
@@ -1526,6 +1556,26 @@ export function buildPersistentSkillSnapshot(
   for (const available of availableEntries) {
     const installedEntry = installed.get(available.runtimeName) ?? null;
     const desired = desiredSet.has(available.key);
+    if (isPaperclipSkillSourceMissing(available)) {
+      entries.push({
+        key: available.key,
+        runtimeName: available.runtimeName,
+        desired,
+        managed: true,
+        state: "missing",
+        sourcePath: null,
+        targetPath: path.join(skillsHome, available.runtimeName),
+        detail: resolvePaperclipSkillMissingDetail(
+          available,
+          missingDetail,
+        ),
+        required: Boolean(available.required),
+        requiredReason: available.requiredReason ?? null,
+        ...buildManagedSkillOrigin(available),
+      });
+      continue;
+    }
+
     let state: AdapterSkillEntry["state"] = "available";
     let managed = false;
     let detail: string | null = null;
@@ -1618,6 +1668,11 @@ function normalizeConfiguredPaperclipRuntimeSkills(value: unknown): PaperclipSki
       key,
       runtimeName,
       source,
+      sourceStatus: entry.sourceStatus === "missing" ? "missing" : "available",
+      missingDetail:
+        typeof entry.missingDetail === "string" && entry.missingDetail.trim().length > 0
+          ? entry.missingDetail.trim()
+          : null,
       required: asBoolean(entry.required, false),
       requiredReason:
         typeof entry.requiredReason === "string" && entry.requiredReason.trim().length > 0

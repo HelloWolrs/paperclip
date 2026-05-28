@@ -251,6 +251,32 @@ describe("adapter skill snapshots", () => {
     ]);
   });
 
+  it("reports source-missing company runtime skills without orphan warnings", () => {
+    const snapshot = buildRuntimeMountedSkillSnapshot({
+      adapterType: "codex_local",
+      availableEntries: [{
+        key: "company/example/reflection-coach",
+        runtimeName: "reflection-coach--abc123",
+        source: "/paperclip/skills/example/__runtime__/reflection-coach--abc123",
+        sourceStatus: "missing",
+        missingDetail: "Company skill exists, but its local source is missing.",
+      }],
+      desiredSkills: ["company/example/reflection-coach"],
+      configuredDetail: "Mounted on next run.",
+    });
+
+    expect(snapshot.warnings).toEqual([]);
+    expect(snapshot.entries).toEqual([
+      expect.objectContaining({
+        key: "company/example/reflection-coach",
+        state: "missing",
+        origin: "company_managed",
+        sourcePath: null,
+        detail: "Company skill exists, but its local source is missing.",
+      }),
+    ]);
+  });
+
   it("keeps unsupported runtime-mounted adapters in tracked-only state", () => {
     const snapshot = buildRuntimeMountedSkillSnapshot({
       adapterType: "acpx_local",
