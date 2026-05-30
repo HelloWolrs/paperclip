@@ -5547,7 +5547,12 @@ export function issueRoutes(
         return;
       }
       assertCompanyAccess(req, issue.companyId);
-      if (!(await assertAgentIssueMutationAllowed(req, res, issue))) return;
+
+      // Intentionally NOT calling assertAgentIssueMutationAllowed here:
+      // that gate requires the caller hold the active checkout on the issue,
+      // which breaks the <60s self-redaction guarantee the moment the issue
+      // is reassigned to another agent (the original author then gets 409).
+      // Author identity is independently enforced below via actorOwnsComment.
 
       const comment = await svc.getComment(commentId);
       if (!comment || comment.issueId !== id) {
