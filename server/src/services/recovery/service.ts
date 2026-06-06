@@ -841,6 +841,10 @@ export function recoveryService(db: Db, deps: { enqueueWakeup: RecoveryWakeup })
   }
 
   async function hasAnyStaleRunEvaluation(companyId: string, runId: string) {
+    // Intentionally not filtered by `hiddenAt` — the recur guard treats an
+    // archived (hidden) eval as "already filed for this orphan" so that
+    // hiding the eval does NOT reset the spam-prevention guard (Greptile P2
+    // on PR #7653).
     const [row] = await db
       .select({ id: issues.id })
       .from(issues)
@@ -849,7 +853,6 @@ export function recoveryService(db: Db, deps: { enqueueWakeup: RecoveryWakeup })
           eq(issues.companyId, companyId),
           eq(issues.originKind, STALE_ACTIVE_RUN_EVALUATION_ORIGIN_KIND),
           eq(issues.originId, runId),
-          isNull(issues.hiddenAt),
         ),
       )
       .limit(1);
