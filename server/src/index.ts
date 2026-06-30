@@ -41,6 +41,8 @@ import {
 import { createFeedbackTraceShareClientFromConfig } from "./services/feedback-share-client.js";
 import { buildRuntimeApiCandidateUrls, choosePrimaryRuntimeApiUrl } from "./runtime-api.js";
 import { createPluginWorkerManager } from "./services/plugin-worker-manager.js";
+import { startAcpPollWorkerWithDeps } from "./services/acp-poll-worker-wiring.js";
+import type { AcpPollWorkerHandle } from "./services/acp-poll-worker.js";
 import { createStorageServiceFromConfig } from "./storage/index.js";
 import { printStartupBanner } from "./startup-banner.js";
 import { getBoardClaimWarningUrl, initializeBoardClaimChallenge } from "./board-claim.js";
@@ -855,6 +857,28 @@ export async function startServer(): Promise<StartedServer> {
   // reject valid external adapter types during the startup loading window.
   const { waitForExternalAdapters } = await import("./adapters/registry.js");
   await waitForExternalAdapters();
+
+  let acpPollWorkerHandle: AcpPollWorkerHandle | null = null;
+  if (process.env.PAPERCLIP_ACP_POLL_ENABLED === "true") {
+    const acpBaseUrl = process.env.PAPERCLIP_ACP_POLL_BASE_URL
+      ?? "https://marketplace.basysanalytics.com";
+    acpPollWorkerHandle = startAcpPollWorkerWithDeps(db, { baseUrl: acpBaseUrl });
+    logger.info({ acpBaseUrl }, "ACP outbound poll worker started");
+    const appLocals = (app as { locals?: { paperclipShutdown?: () => void } }).locals;
+    if (appLocals) {
+      const priorShutdown = appLocals.paperclipShutdown;
+      appLocals.paperclipShutdown = () => {
+        try {
+          priorShutdown?.();
+        } catch (err) {
+          logger.warn({ err }, "Prior paperclipShutdown handler threw; continuing to drain ACP poll worker");
+        }
+        void acpPollWorkerHandle?.stop(5_000).catch((err) => {
+          logger.warn({ err }, "ACP poll worker stop failed");
+        });
+      };
+    }
+  }
 
   await new Promise<void>((resolveListen, rejectListen) => {
     const onError = (err: Error) => {
