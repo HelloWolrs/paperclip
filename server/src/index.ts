@@ -868,7 +868,11 @@ export async function startServer(): Promise<StartedServer> {
     if (appLocals) {
       const priorShutdown = appLocals.paperclipShutdown;
       appLocals.paperclipShutdown = () => {
-        priorShutdown?.();
+        try {
+          priorShutdown?.();
+        } catch (err) {
+          logger.warn({ err }, "Prior paperclipShutdown handler threw; continuing to drain ACP poll worker");
+        }
         void acpPollWorkerHandle?.stop(5_000).catch((err) => {
           logger.warn({ err }, "ACP poll worker stop failed");
         });

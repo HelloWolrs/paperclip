@@ -157,10 +157,15 @@ export function startAcpPollWorker(deps: AcpPollWorkerDeps): AcpPollWorkerHandle
   async function runAgentLoop(snapshot: AcpPollAgentSnapshot, signal: AbortSignal): Promise<void> {
     const lru = new IdempotencyLru(lruSize, lruTtlMs);
     let backoffMs = 0;
+    // Hoisted above the while so the count persists across iterations.
+    // If this declaration sits inside the loop the network catch keeps
+    // re-entering the "instant retry" branch forever and the sleep is
+    // never reached — a tight-loop DoS-against-self on persistent
+    // network failure (BASA-30565 Marek review).
+    let networkAttempts = 0;
 
     while (!signal.aborted) {
       const start = deps.nowMs();
-      let networkAttempts = 0;
       let pollUrl = `${deps.baseUrl}/api/acp/dispatch/agent-poll?wait=${pollWaitSeconds}s`;
 
       try {
@@ -174,6 +179,9 @@ export function startAcpPollWorker(deps: AcpPollWorkerDeps): AcpPollWorkerHandle
           requestTimeoutMs,
           signal,
         );
+        // Got an HTTP response — reset the network-attempt counter so the
+        // next network failure starts from a clean instant-retry budget.
+        networkAttempts = 0;
 
         if (res.status === 200) {
           const envelope = (await res.json()) as AcpPollEnvelope;

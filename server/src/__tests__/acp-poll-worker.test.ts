@@ -408,6 +408,66 @@ describe("acp-poll-worker", () => {
     expect(bumpFn).toHaveBeenCalledTimes(2);
   });
 
+  it("network errors past the instant-retry cap sleep the network backoff (BASA-30565 regression)", async () => {
+    // Before the BASA-30565 fix, `networkAttempts` was declared inside the
+    // while loop, so the catch always re-entered the instant-retry branch
+    // and `await sleep(networkBackoffMs)` was unreachable. With the fix,
+    // four consecutive throws produce exactly one network-backoff sleep.
+    const { fetch } = makeSequencedFetch([
+      new Error("net 1"),
+      new Error("net 2"),
+      new Error("net 3"),
+      new Error("net 4"),
+      emptyResponse(204),
+    ]);
+    const sleepHarness = makeInstantSleep();
+    const handle = startAcpPollWorker(
+      makeDeps({
+        agentsSnapshot: vi.fn().mockResolvedValue([makeAgent()]),
+        fetch,
+        sleep: sleepHarness.sleep,
+        networkInstantRetries: 3,
+        networkBackoffMs: 5_000,
+      }),
+    );
+    await waitFor(() => sleepHarness.calls.includes(5_000));
+    await handle.stop(50);
+    // Exactly one 5_000ms call — the post-cap sleep. The three instant
+    // retries went via `continue` and did NOT sleep.
+    expect(sleepHarness.calls.filter((ms) => ms === 5_000)).toHaveLength(1);
+  });
+
+  it("network-attempt counter resets after a successful HTTP response", async () => {
+    // After hoisting `networkAttempts` to loop scope, we must clear it on
+    // each HTTP response, else: 2 net errors → 200 → next net failure
+    // would only get 1 instant retry (3 - 2) before sleeping. Verify
+    // that's NOT the behavior: after a 200, three net errors back-to-back
+    // do NOT trigger a sleep.
+    const { fetch } = makeSequencedFetch([
+      new Error("net A"),
+      new Error("net B"),
+      emptyResponse(204),
+      new Error("net C"),
+      new Error("net D"),
+      new Error("net E"),
+      emptyResponse(204),
+    ]);
+    const sleepHarness = makeInstantSleep();
+    const handle = startAcpPollWorker(
+      makeDeps({
+        agentsSnapshot: vi.fn().mockResolvedValue([makeAgent()]),
+        fetch,
+        sleep: sleepHarness.sleep,
+        networkInstantRetries: 3,
+        networkBackoffMs: 5_000,
+      }),
+    );
+    // Give the worker enough iterations to consume the sequenced fetch.
+    await new Promise((r) => setTimeout(r, 30));
+    await handle.stop(50);
+    expect(sleepHarness.calls.filter((ms) => ms === 5_000)).toHaveLength(0);
+  });
+
   it("stop drains and stops all loops within drainTimeoutMs", async () => {
     const { fetch } = makeSequencedFetch([emptyResponse(204), emptyResponse(204)]);
     const handle = startAcpPollWorker(
