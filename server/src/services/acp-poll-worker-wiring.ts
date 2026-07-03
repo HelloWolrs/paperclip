@@ -37,6 +37,37 @@ function asRecord(value: unknown): Record<string, unknown> | null {
   return null;
 }
 
+// `agents.adapter_config.env` values follow the `EnvBinding` union from
+// @paperclipai/shared: either a legacy plaintext string, a `{type:"plain",value}`
+// wrapper (server-side normalization on write), or a `{type:"secret_ref",secretId,version?}`
+// pointer. Returns the concrete token string for the first two shapes; returns
+// null (and the caller logs) for secret_ref and any other unresolvable shape,
+// because startup discovery cannot resolve secrets synchronously — those must
+// flow through the secrets service.
+export type ExtractAcpTokenResult =
+  | { kind: "token"; value: string }
+  | { kind: "empty" }
+  | { kind: "secret_ref" }
+  | { kind: "unknown" };
+
+export function extractAcpToken(raw: unknown): ExtractAcpTokenResult {
+  if (typeof raw === "string") {
+    return raw.length > 0 ? { kind: "token", value: raw } : { kind: "empty" };
+  }
+  const wrapper = asRecord(raw);
+  if (wrapper) {
+    if (wrapper.type === "plain" && typeof wrapper.value === "string") {
+      return wrapper.value.length > 0
+        ? { kind: "token", value: wrapper.value }
+        : { kind: "empty" };
+    }
+    if (wrapper.type === "secret_ref") {
+      return { kind: "secret_ref" };
+    }
+  }
+  return { kind: "unknown" };
+}
+
 export async function discoverAcpAgents(db: Db): Promise<AcpPollAgentSnapshot[]> {
   const rows = await db
     .select({
@@ -54,13 +85,29 @@ export async function discoverAcpAgents(db: Db): Promise<AcpPollAgentSnapshot[]>
     if (!env) continue;
     for (const [key, raw] of Object.entries(env)) {
       if (!key.startsWith(ACP_TOKEN_PREFIX)) continue;
-      if (typeof raw !== "string" || raw.length === 0) continue;
-      snapshots.push({
-        companyId: row.companyId,
-        agentId: row.id,
-        slug: envKeyToSlug(key),
-        token: raw,
-      });
+      const extracted = extractAcpToken(raw);
+      if (extracted.kind === "token") {
+        snapshots.push({
+          companyId: row.companyId,
+          agentId: row.id,
+          slug: envKeyToSlug(key),
+          token: extracted.value,
+        });
+        continue;
+      }
+      if (extracted.kind === "secret_ref") {
+        logger.warn(
+          { tag: "acp-poll", agentId: row.id, envKey: key },
+          "ACP token stored as secret_ref; startup discovery cannot resolve secrets. Bind via secrets service or store as plain.",
+        );
+        continue;
+      }
+      if (extracted.kind === "unknown") {
+        logger.warn(
+          { tag: "acp-poll", agentId: row.id, envKey: key, rawType: typeof raw },
+          "ACP token env value has unrecognized shape; expected string or {type:'plain',value:string}",
+        );
+      }
     }
   }
   return snapshots;
